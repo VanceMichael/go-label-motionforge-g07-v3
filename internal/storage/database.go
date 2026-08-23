@@ -136,6 +136,21 @@ type Queryer interface {
 }
 
 func (d *Database) Write(ctx context.Context, fn func(*sql.Tx) error) (err error) {
+	for attempt := 0; attempt < 5; attempt++ {
+		err = d.writeOnce(ctx, fn)
+		if !isSQLiteBusy(err) || attempt == 4 {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	return err
+}
+
+func (d *Database) writeOnce(ctx context.Context, fn func(*sql.Tx) error) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -162,6 +177,14 @@ func (d *Database) Write(ctx context.Context, fn func(*sql.Tx) error) (err error
 		return fmt.Errorf("commit write transaction: %w", err)
 	}
 	return nil
+}
+
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "database is locked") || strings.Contains(message, "SQLITE_BUSY")
 }
 
 func (d *Database) Read(ctx context.Context, fn func(*sql.Tx) error) (err error) {
