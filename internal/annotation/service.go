@@ -156,6 +156,9 @@ func (s *Service) Renew(ctx context.Context, principal auth.Principal, batchID, 
 		if err != nil {
 			return err
 		}
+		if batch.Owner != principal.UserID || batch.LeaseToken != token || batch.Version != version {
+			return domain.Wrap(domain.ErrLeaseLost, "annotation.renew", "annotation_batch", batchID, "lease identity or ownership changed", nil)
+		}
 		if err := s.repo.Renew(ctx, tx, principal.TenantID, batchID, principal.UserID, token, version, now, expires); err != nil {
 			return err
 		}

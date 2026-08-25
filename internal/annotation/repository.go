@@ -159,9 +159,10 @@ func (Repository) Renew(ctx context.Context, q storage.Queryer, tenantID, batchI
 	result, err := q.ExecContext(ctx, `
 		UPDATE annotation_batches
 		SET lease_expires_at = ?, updated_at = ?, version = version + 1
-		WHERE tenant_id = ? AND id = ? AND status = 'claimed'`,
+		WHERE tenant_id = ? AND id = ? AND status = 'claimed'
+		  AND owner = ? AND lease_token = ? AND version = ? AND lease_expires_at > ?`,
 		storage.FormatTime(expiresAt), storage.FormatTime(now), tenantID, batchID,
-	)
+		owner, token, version, storage.FormatTime(now))
 	if err != nil {
 		return fmt.Errorf("renew annotation batch: %w", err)
 	}
