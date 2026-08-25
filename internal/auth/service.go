@@ -201,17 +201,17 @@ func (s *Service) Logout(ctx context.Context, principal Principal, requestID str
 		return err
 	}
 	now := s.clock.Now()
-	version, revoked, err := s.repo.SessionRevocationState(ctx, s.db.SQL(), principal.TenantID, principal.SessionID)
-	if err != nil {
-		return err
-	}
-	if revoked {
-		return nil
-	}
-	if err := s.repo.RevokeSession(ctx, s.db.SQL(), principal.TenantID, principal.SessionID, version, now); err != nil {
-		return err
-	}
 	return s.db.Write(ctx, func(tx *sql.Tx) error {
+		version, revoked, err := s.repo.SessionRevocationState(ctx, tx, principal.TenantID, principal.SessionID)
+		if err != nil {
+			return err
+		}
+		if revoked {
+			return nil
+		}
+		if err := s.repo.RevokeSession(ctx, tx, principal.TenantID, principal.SessionID, version, now); err != nil {
+			return err
+		}
 		return s.audits.Append(ctx, tx, audit.Record{ID: auditID, TenantID: principal.TenantID, ActorID: principal.UserID, Action: "auth.logout", ObjectType: "auth_session", ObjectID: principal.SessionID, Outcome: "revoked", RequestID: requestID, CreatedAt: now})
 	})
 }
