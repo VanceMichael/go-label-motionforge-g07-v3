@@ -132,6 +132,87 @@ func TestEndToEndCaptureAnnotationDatasetTraining(t *testing.T) {
 	}
 }
 
+func TestReworkResetsItemsAndIsAtomicWithStatus(t *testing.T) {
+	environment := newEnvironment(t)
+	fixture := environment.validatedCapture(t)
+	ctx := context.Background()
+
+	batch, _, err := environment.annotations.Create(ctx, environment.steward, fixture.plan.Capture.ID, "rework-batch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := environment.annotations.Claim(ctx, environment.reviewer, batch.ID, "rework-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range claim.Items {
+		if _, err := environment.annotations.Annotate(ctx, environment.reviewer, batch.ID, claim.Batch.LeaseToken, item.ID, "grasp", `{"quality":"accepted"}`, "rework-item", item.Version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := environment.annotations.Submit(ctx, environment.reviewer, batch.ID, claim.Batch.LeaseToken, "rework-submit"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A failing audit/outbox write must roll back the rework status change together
+	// with the item completion reset, leaving the batch submitted and items complete.
+	if _, err := environment.database.SQL().Exec(`
+		CREATE TRIGGER fail_rework_audit BEFORE INSERT ON audit_events
+		WHEN NEW.action = 'annotation.review' AND NEW.outcome = 'rework'
+		BEGIN SELECT RAISE(ABORT, 'forced rework audit failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.annotations.Review(ctx, environment.steward, batch.ID, "rework-review", false, "needs revision"); err == nil {
+		t.Fatal("rework unexpectedly succeeded while audit insert failed")
+	}
+	failedBatch, failedItems, err := environment.annotations.Get(ctx, environment.steward, batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failedBatch.Status != domain.AnnotationSubmitted {
+		t.Fatalf("failed rework leaked batch status: %+v", failedBatch)
+	}
+	for index, item := range failedItems {
+		if !item.Complete {
+			t.Fatalf("failed rework reset item %d completion: %+v", index, item)
+		}
+	}
+
+	if _, err := environment.database.SQL().Exec(`DROP TRIGGER fail_rework_audit`); err != nil {
+		t.Fatal(err)
+	}
+
+	reworked, err := environment.annotations.Review(ctx, environment.steward, batch.ID, "rework-review", false, "needs revision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reworked.Status != domain.AnnotationRework {
+		t.Fatalf("rework status = %s", reworked.Status)
+	}
+	_, reworkedItems, err := environment.annotations.Get(ctx, environment.steward, batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, item := range reworkedItems {
+		if item.Complete {
+			t.Fatalf("rework did not reset item %d: %+v", index, item)
+		}
+	}
+
+	// After rework the reviewer can reclaim the batch, but cannot resubmit until every
+	// item is annotated again, because the completion markers were reset atomically.
+	reclaim, err := environment.annotations.Claim(ctx, environment.reviewer, batch.ID, "rework-reclaim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reclaim.Batch.Status != domain.AnnotationClaimed || reclaim.Batch.Owner != environment.reviewer.UserID {
+		t.Fatalf("reclaim after rework failed: %+v", reclaim.Batch)
+	}
+	if _, err := environment.annotations.Submit(ctx, environment.reviewer, batch.ID, reclaim.Batch.LeaseToken, "rework-resubmit"); !errors.Is(err, domain.ErrPrecondition) {
+		t.Fatalf("resubmit without re-annotating should be rejected, got %v", err)
+	}
+}
+
 func TestCapturePlanReplayIsScopedAndExact(t *testing.T) {
 	environment := newEnvironment(t)
 	ctx := context.Background()

@@ -248,5 +248,25 @@ func (Repository) Review(ctx context.Context, q storage.Queryer, tenantID, batch
 	if changed != 1 {
 		return domain.Conflict("annotation.review", "annotation_batch", batchID, "state or version changed")
 	}
+	if !accept {
+		if err := resetItemsForRework(ctx, q, tenantID, batchID, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func resetItemsForRework(ctx context.Context, q storage.Queryer, tenantID, batchID string, now time.Time) error {
+	result, err := q.ExecContext(ctx, `
+		UPDATE annotation_items
+		SET complete = 0, updated_at = ?, version = version + 1
+		WHERE tenant_id = ? AND batch_id = ? AND complete = 1`,
+		storage.FormatTime(now), tenantID, batchID)
+	if err != nil {
+		return fmt.Errorf("reset annotation items for rework: %w", err)
+	}
+	if _, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("read annotation rework reset result: %w", err)
+	}
 	return nil
 }
