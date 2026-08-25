@@ -176,6 +176,54 @@ func TestCapturePlanReplayIsScopedAndExact(t *testing.T) {
 	}
 }
 
+func TestCapturePlanReplayAfterLeaseReleasedReturnsOriginalPlan(t *testing.T) {
+	environment := newEnvironment(t)
+	ctx := context.Background()
+	facilityValue, err := environment.facilities.CreateFacility(ctx, environment.admin, "Recover Lab", "UTC", "recover-facility")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rig, err := environment.facilities.CreateRig(ctx, environment.admin, facilityValue.ID, "Recover Rig", domain.CapabilityPose, "recover-rig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario, err := environment.facilities.CreateScenario(ctx, environment.admin, "Recover Pose", "office", domain.CapabilityPose, "recover-scenario")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := capture.PlanInput{FacilityID: facilityValue.ID, ScenarioID: scenario.ID, RigID: rig.ID, ConsentRef: "consent-recover", IdempotencyKey: "recover-key", RequestID: "recover-first"}
+	first, err := environment.captures.Plan(ctx, environment.operator, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Release the original device lease (e.g. it expired via recovery or was
+	// explicitly released) before replaying the capture plan with the same key.
+	if err := environment.facilities.ReleaseRig(ctx, environment.operator, rig.ID, first.Lease.ID, first.Lease.Token, first.Lease.Version, "recover-release"); err != nil {
+		t.Fatal(err)
+	}
+	input.RequestID = "recover-replay"
+	replayed, err := environment.captures.Plan(ctx, environment.operator, input)
+	if err != nil {
+		t.Fatalf("replay after release: %v", err)
+	}
+	if !replayed.Replay || replayed.Capture.ID != first.Capture.ID || replayed.Lease.ID != first.Lease.ID || replayed.Lease.Token != first.Lease.Token {
+		t.Fatalf("replay reallocated durable result: first=%+v replayed=%+v", first, replayed)
+	}
+	var captureCount, leaseCount, liveLeaseCount int
+	if err := environment.database.SQL().QueryRow(`SELECT COUNT(*) FROM capture_sessions`).Scan(&captureCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.database.SQL().QueryRow(`SELECT COUNT(*) FROM rig_leases`).Scan(&leaseCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.database.SQL().QueryRow(`SELECT COUNT(*) FROM rig_leases WHERE released_at IS NULL`).Scan(&liveLeaseCount); err != nil {
+		t.Fatal(err)
+	}
+	if captureCount != 1 || leaseCount != 1 || liveLeaseCount != 0 {
+		t.Fatalf("replay reallocated side effects: captures=%d leases=%d live=%d", captureCount, leaseCount, liveLeaseCount)
+	}
+}
+
 func TestAuditFailureRollsBackCaptureTransition(t *testing.T) {
 	environment := newEnvironment(t)
 	ctx := context.Background()

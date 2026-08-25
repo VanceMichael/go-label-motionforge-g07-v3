@@ -81,14 +81,13 @@ func (s *Service) Plan(ctx context.Context, principal auth.Principal, input Plan
 			if err := json.Unmarshal(record.Response, &result); err != nil {
 				return fmt.Errorf("decode plan replay: %w", err)
 			}
+			// The durable response is the source of truth for the lifetime of
+			// the idempotency record, regardless of the original rig lease's
+			// lifecycle. A released or expired lease never justifies silently
+			// reallocating a new capture or device lease on replay; callers that
+			// need a fresh lease use Reopen or ReserveRig against this capture.
 			result.Replay = true
-			var releasedAt sql.NullString
-			err := tx.QueryRowContext(ctx, `SELECT released_at FROM rig_leases WHERE id = ?`, result.Lease.ID).Scan(&releasedAt)
-			if err == nil && !releasedAt.Valid {
-				return nil
-			}
-			// A replay whose original lease has already been released falls
-			// through to planning instead of returning the durable response.
+			return nil
 		}
 		facilityValue, err := s.facilities.FindFacility(ctx, tx, principal.TenantID, input.FacilityID)
 		if err != nil {
