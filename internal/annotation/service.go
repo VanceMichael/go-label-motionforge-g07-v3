@@ -119,7 +119,7 @@ func (s *Service) Claim(ctx context.Context, principal auth.Principal, batchID, 
 		if err != nil {
 			return err
 		}
-		if batch.Status != domain.AnnotationOpen && batch.Status != domain.AnnotationRework && !(batch.Status == domain.AnnotationClaimed && batch.Version >= 3) && !(batch.Status == domain.AnnotationClaimed && batch.LeaseExpiresAt != nil && !now.Before(*batch.LeaseExpiresAt)) {
+		if batch.Status != domain.AnnotationOpen && batch.Status != domain.AnnotationRework && !(batch.Status == domain.AnnotationClaimed && batch.LeaseExpiresAt != nil && !now.Before(*batch.LeaseExpiresAt)) {
 			return domain.Conflict("annotation.claim", "annotation_batch", batchID, "batch has an active owner or is not claimable")
 		}
 		expires := now.Add(s.leaseTTL)

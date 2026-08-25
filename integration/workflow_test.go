@@ -307,6 +307,82 @@ func TestConcurrentAnnotationClaimHasOneOwner(t *testing.T) {
 	}
 }
 
+func TestConcurrentAnnotationClaimOnReworkBatchHasOneOwner(t *testing.T) {
+	environment := newEnvironment(t)
+	fixture := environment.validatedCapture(t)
+	batch, _, err := environment.annotations.Create(context.Background(), environment.steward, fixture.plan.Capture.ID, "rework-claim-batch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Drive the batch through submit -> rework so a second claim round is legal.
+	claim, err := environment.annotations.Claim(context.Background(), environment.reviewer, batch.ID, "rework-first-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, items, err := environment.annotations.Get(context.Background(), environment.reviewer, batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if _, err := environment.annotations.Annotate(context.Background(), environment.reviewer, batch.ID, claim.Batch.LeaseToken, item.ID, "grasp", `{"quality":"accepted"}`, "rework-item", item.Version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := environment.annotations.Submit(context.Background(), environment.reviewer, batch.ID, claim.Batch.LeaseToken, "rework-submit"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.annotations.Review(context.Background(), environment.steward, batch.ID, "rework-review", false, "incomplete"); err != nil {
+		t.Fatal(err)
+	}
+	secondReviewer := environment.createPrincipal(t, "reviewer3@motion.test", "Third Reviewer", domain.RoleReviewer)
+	start := make(chan struct{})
+	results := make(chan annotation.ClaimResult, 2)
+	errorsCh := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	claimFn := func(principal auth.Principal) {
+		ready.Done()
+		<-start
+		result, err := environment.annotations.Claim(context.Background(), principal, batch.ID, "concurrent-rework-claim")
+		if err != nil {
+			errorsCh <- err
+			return
+		}
+		results <- result
+	}
+	go claimFn(environment.reviewer)
+	go claimFn(secondReviewer)
+	ready.Wait()
+	close(start)
+	var successCount, conflictCount int
+	var owner string
+	for i := 0; i < 2; i++ {
+		select {
+		case result := <-results:
+			successCount++
+			if result.Batch.Owner == "" || result.Batch.LeaseToken == "" {
+				t.Errorf("successful claim lacks ownership: %+v", result.Batch)
+			}
+			if owner == "" {
+				owner = result.Batch.Owner
+			} else if result.Batch.Owner != owner {
+				t.Errorf("two successful claims with different owners: %q vs %q", owner, result.Batch.Owner)
+			}
+		case err := <-errorsCh:
+			if errors.Is(err, domain.ErrConflict) {
+				conflictCount++
+			} else {
+				t.Errorf("unexpected claim error: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("concurrent rework claim did not finish")
+		}
+	}
+	if successCount != 1 || conflictCount != 1 {
+		t.Fatalf("rework claim outcomes success=%d conflict=%d, want 1/1", successCount, conflictCount)
+	}
+}
+
 func TestRecoveryIsAtomicAcrossExpiredResources(t *testing.T) {
 	environment := newEnvironment(t)
 	fixture := environment.validatedCapture(t)

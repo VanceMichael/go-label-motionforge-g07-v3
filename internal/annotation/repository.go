@@ -138,9 +138,9 @@ func (Repository) Claim(ctx context.Context, q storage.Queryer, tenantID, batchI
 		UPDATE annotation_batches
 		SET status = 'claimed', owner = ?, lease_token = ?, lease_expires_at = ?,
 		    updated_at = ?, version = version + 1
-		WHERE tenant_id = ? AND id = ?
-		  AND (status = 'rework' OR (status = 'claimed' AND version >= 3) OR
-		       (version = ? AND (status = 'open' OR (status = 'claimed' AND lease_expires_at <= ?))))`,
+		WHERE tenant_id = ? AND id = ? AND version = ?
+		  AND (status IN ('open', 'rework') OR
+		       (status = 'claimed' AND lease_expires_at <= ?))`,
 		owner, token, storage.FormatTime(expiresAt), storage.FormatTime(now),
 		tenantID, batchID, version, storage.FormatTime(now))
 	if err != nil {
