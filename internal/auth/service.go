@@ -88,14 +88,17 @@ func (s *Service) Bootstrap(ctx context.Context, input BootstrapInput) (domain.T
 	now := s.clock.Now()
 	tenant := domain.Tenant{ID: tenantID, Name: input.TenantName, Active: true, CreatedAt: now, UpdatedAt: now, Version: 1}
 	user := domain.User{ID: userID, TenantID: tenantID, Email: input.Email, DisplayName: input.DisplayName, PasswordHash: passwordHash, Role: domain.RoleTenantAdmin, Active: true, CreatedAt: now, UpdatedAt: now, Version: 1}
-	// Keep the identity rows durable before recording the audit event.  This
-	// makes an audit outage unable to roll back the bootstrap operation.
-	err = s.repo.InsertBootstrapIdentity(ctx, s.db.SQL(), tenant, user)
-	if err == nil {
-		err = s.db.Write(ctx, func(tx *sql.Tx) error {
-			return s.audits.Append(ctx, tx, audit.Record{ID: auditID, TenantID: tenantID, ActorID: userID, Action: "tenant.bootstrap", ObjectType: "tenant", ObjectID: tenantID, Outcome: "created", RequestID: "bootstrap", CreatedAt: now})
-		})
-	}
+	// Insert the tenant/admin identity and the bootstrap audit event in a
+	// single transaction so that an audit write failure rolls back the
+	// identity rows.  Otherwise a rejected audit leaves the tenant and
+	// administrator stranded in the database, and later bootstrap retries
+	// collide with those dirty identities.
+	err = s.db.Write(ctx, func(tx *sql.Tx) error {
+		if err := s.repo.InsertBootstrapIdentity(ctx, tx, tenant, user); err != nil {
+			return err
+		}
+		return s.audits.Append(ctx, tx, audit.Record{ID: auditID, TenantID: tenantID, ActorID: userID, Action: "tenant.bootstrap", ObjectType: "tenant", ObjectID: tenantID, Outcome: "created", RequestID: "bootstrap", CreatedAt: now})
+	})
 	if err != nil {
 		return domain.Tenant{}, domain.User{}, fmt.Errorf("bootstrap tenant: %w", err)
 	}
