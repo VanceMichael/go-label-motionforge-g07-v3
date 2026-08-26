@@ -199,8 +199,9 @@ func (Repository) ReleaseLease(ctx context.Context, q storage.Queryer, tenantID,
 	result, err := q.ExecContext(ctx, `
 		UPDATE rig_leases
 		SET released_at = ?, updated_at = ?, version = version + 1
-		WHERE tenant_id = ? AND id = ? AND released_at IS NULL`, storage.FormatTime(now),
-		storage.FormatTime(now), tenantID, leaseID)
+		WHERE tenant_id = ? AND id = ? AND owner = ? AND token = ?
+		  AND version = ? AND released_at IS NULL`, storage.FormatTime(now),
+		storage.FormatTime(now), tenantID, leaseID, owner, token, version)
 	if err != nil {
 		return fmt.Errorf("release rig lease: %w", err)
 	}
@@ -209,7 +210,7 @@ func (Repository) ReleaseLease(ctx context.Context, q storage.Queryer, tenantID,
 		return fmt.Errorf("read rig release result: %w", err)
 	}
 	if changed != 1 {
-		return domain.Wrap(domain.ErrLeaseLost, "facility.release_lease", "rig_lease", leaseID, "lease changed or belongs to another owner", nil)
+		return domain.Wrap(domain.ErrLeaseLost, "facility.release_lease", "rig_lease", leaseID, "lease expired, changed, or belongs to another owner", nil)
 	}
 	return nil
 }
