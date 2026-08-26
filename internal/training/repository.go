@@ -183,13 +183,20 @@ func (Repository) Fail(ctx context.Context, q storage.Queryer, job domain.Traini
 	if retry {
 		status = domain.JobRetrying
 	}
+	// Preserve the durable checkpoint on a transient (retryable) failure so
+	// the next attempt resumes past already-completed non-idempotent side
+	// effects. Only a permanent failure clears progress.
+	checkpoint := ""
+	if retry {
+		checkpoint = job.Checkpoint
+	}
 	result, err := q.ExecContext(ctx, `
 		UPDATE training_jobs
 		SET status = ?, owner = '', lease_token = '', lease_expires_at = NULL,
-		    checkpoint = '', last_error = ?, next_attempt_at = ?, updated_at = ?, version = version + 1
+		    checkpoint = ?, last_error = ?, next_attempt_at = ?, updated_at = ?, version = version + 1
 		WHERE tenant_id = ? AND id = ? AND status = 'running'
 		  AND owner = ? AND lease_token = ? AND version = ?`,
-		status, message, storage.FormatTime(nextAttempt), storage.FormatTime(now),
+		status, checkpoint, message, storage.FormatTime(nextAttempt), storage.FormatTime(now),
 		job.TenantID, job.ID, owner, token, job.Version)
 	if err != nil {
 		return fmt.Errorf("fail training job: %w", err)

@@ -247,7 +247,12 @@ func (s *Service) Fail(ctx context.Context, principal auth.Principal, jobID, tok
 		if err := job.Status.Transition(to); err != nil {
 			return err
 		}
-		if retry {
+		if !retry {
+			// A permanent failure abandons the job, so the durable checkpoint
+			// no longer represents progress worth resuming from. A transient
+			// (retryable) failure keeps the checkpoint intact so the next
+			// attempt resumes past any already-completed non-idempotent side
+			// effects (e.g. artifact uploads) instead of replaying them.
 			job.Checkpoint = ""
 		}
 		if err := s.repo.Fail(ctx, tx, job, principal.UserID, token, message, retry, nextAttempt, now); err != nil {

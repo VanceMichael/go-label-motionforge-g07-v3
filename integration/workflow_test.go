@@ -385,3 +385,115 @@ func TestRestartRetainsWorkflowState(t *testing.T) {
 }
 
 var _ *sql.DB
+
+func TestTransientTrainingFailureRetainsCheckpoint(t *testing.T) {
+	environment := newEnvironment(t)
+	fixture := environment.validatedCapture(t)
+	ctx := context.Background()
+
+	batch, items, err := environment.annotations.Create(ctx, environment.steward, fixture.plan.Capture.ID, "retry-batch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := environment.annotations.Claim(ctx, environment.reviewer, batch.ID, "retry-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if _, err := environment.annotations.Annotate(ctx, environment.reviewer, batch.ID, claim.Batch.LeaseToken, item.ID, "grasp", `{"quality":"accepted"}`, "retry-item", item.Version); err != nil {
+			t.Fatalf("annotate item %s: %v", item.ID, err)
+		}
+	}
+	if _, err := environment.annotations.Submit(ctx, environment.reviewer, batch.ID, claim.Batch.LeaseToken, "retry-submit"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.annotations.Review(ctx, environment.steward, batch.ID, "retry-review", true, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	draft, err := environment.datasets.Create(ctx, environment.steward, "Retry set", "retry-dataset")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := environment.datasets.AddCaptures(ctx, environment.steward, draft.ID, "retry-dataset-items", []string{fixture.plan.Capture.ID}); err != nil {
+		t.Fatal(err)
+	}
+	frozen, err := environment.datasets.Freeze(ctx, environment.steward, draft.ID, "retry-freeze")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.datasets.Review(ctx, environment.reviewer, draft.ID, "retry-quality", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	release, err := environment.datasets.Publish(ctx, environment.steward, draft.ID, "retry-publish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if release.Status != domain.DatasetStatusPublished || release.Digest != frozen.Digest {
+		t.Fatalf("published release not usable: %+v", release)
+	}
+
+	job, err := environment.training.Enqueue(ctx, environment.steward, release.ID, "retry-enqueue")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, err := environment.training.Claim(ctx, environment.worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.Job.ID != job.ID || claimed.Attempt.Attempt != 1 {
+		t.Fatalf("unexpected first claim: %+v", claimed)
+	}
+
+	checkpointed, err := environment.training.Checkpoint(ctx, environment.worker, job.ID, claimed.Job.LeaseToken, "artifact-uploaded", claimed.Job.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failed, err := environment.training.Fail(ctx, environment.worker, job.ID, checkpointed.LeaseToken, "transient upload error", "retry-fail", checkpointed.Version, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != domain.JobRetrying || failed.Checkpoint != "artifact-uploaded" {
+		t.Fatalf("transient failure cleared durable progress: %+v", failed)
+	}
+
+	persisted, err := environment.training.Get(ctx, environment.worker, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Checkpoint != "artifact-uploaded" {
+		t.Fatalf("retry did not preserve checkpoint: %+v", persisted)
+	}
+	if persisted.Status != domain.JobRetrying {
+		t.Fatalf("retry status = %s, want retrying", persisted.Status)
+	}
+
+	environment.clock.Advance(2 * time.Second)
+	reclaimed, err := environment.training.Claim(ctx, environment.worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed.Job.ID != job.ID || reclaimed.Attempt.Attempt != 2 {
+		t.Fatalf("unexpected re-claim after retry: %+v", reclaimed)
+	}
+	if reclaimed.Job.Checkpoint != "artifact-uploaded" {
+		t.Fatalf("re-claim did not surface retained checkpoint: %+v", reclaimed.Job)
+	}
+
+	permanentlyFailed, err := environment.training.Fail(ctx, environment.worker, job.ID, reclaimed.Job.LeaseToken, "permanent failure", "retry-permanent", reclaimed.Job.Version, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if permanentlyFailed.Status != domain.JobFailed || permanentlyFailed.Checkpoint != "" {
+		t.Fatalf("permanent failure did not clear checkpoint: %+v", permanentlyFailed)
+	}
+	abandoned, err := environment.training.Get(ctx, environment.worker, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if abandoned.Checkpoint != "" || abandoned.Status != domain.JobFailed {
+		t.Fatalf("permanent failure did not abandon progress: %+v", abandoned)
+	}
+}
