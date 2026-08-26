@@ -212,23 +212,8 @@ func (s *Service) Publish(ctx context.Context, principal auth.Principal, dataset
 		return domain.DatasetRelease{}, err
 	}
 	now := s.clock.Now()
-	preDraft, err := s.repo.FindDraft(ctx, s.db.SQL(), principal.TenantID, datasetID)
-	if err != nil {
-		return domain.DatasetRelease{}, err
-	}
-	preItems, err := s.repo.ListItems(ctx, s.db.SQL(), principal.TenantID, datasetID)
-	if err != nil {
-		return domain.DatasetRelease{}, err
-	}
-	preID, err := domain.NewID("release")
-	if err != nil {
-		return domain.DatasetRelease{}, err
-	}
-	release := domain.DatasetRelease{ID: preID, TenantID: principal.TenantID, DatasetID: datasetID, Revision: preDraft.Revision, Digest: preDraft.Digest, Status: domain.DatasetStatusPublished, PublishedAt: &now, CreatedAt: now, UpdatedAt: now, Version: 1}
-	if err := s.repo.InsertRelease(ctx, s.db.SQL(), release, preItems); err != nil {
-		return domain.DatasetRelease{}, err
-	}
-	err = s.db.Write(ctx, func(tx *sql.Tx) error {
+	var release domain.DatasetRelease
+	err := s.db.Write(ctx, func(tx *sql.Tx) error {
 		draft, err := s.repo.FindDraft(ctx, tx, principal.TenantID, datasetID)
 		if err != nil {
 			return err
@@ -242,6 +227,14 @@ func (s *Service) Publish(ctx context.Context, principal auth.Principal, dataset
 		}
 		if len(items) != draft.ItemCount || membershipDigest(items) != draft.Digest {
 			return domain.Conflict("dataset.publish", "dataset_draft", datasetID, "frozen membership no longer matches digest")
+		}
+		releaseID, err := domain.NewID("release")
+		if err != nil {
+			return err
+		}
+		release = domain.DatasetRelease{ID: releaseID, TenantID: principal.TenantID, DatasetID: datasetID, Revision: draft.Revision, Digest: draft.Digest, Status: domain.DatasetStatusPublished, PublishedAt: &now, CreatedAt: now, UpdatedAt: now, Version: 1}
+		if err := s.repo.InsertRelease(ctx, tx, release, items); err != nil {
+			return err
 		}
 		if err := s.repo.Transition(ctx, tx, principal.TenantID, datasetID, draft.Status, domain.DatasetStatusPublished, draft.Version, "", now); err != nil {
 			return err

@@ -384,4 +384,91 @@ func TestRestartRetainsWorkflowState(t *testing.T) {
 	}
 }
 
+// TestPublishOutboxFailureRollsBackRelease reproduces the cross-entity rollback
+// divergence: when outbox event insertion fails during publish, the dataset
+// release must be rolled back alongside the dataset state transition and the
+// outbox event, leaving no half-published release behind.
+func TestPublishOutboxFailureRollsBackRelease(t *testing.T) {
+	environment := newEnvironment(t)
+	fixture := environment.validatedCapture(t)
+	ctx := context.Background()
+
+	// Make the capture eligible for dataset membership by accepting an annotation batch.
+	batch, _, err := environment.annotations.Create(ctx, environment.steward, fixture.plan.Capture.ID, "rollback-publish-batch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := environment.annotations.Claim(ctx, environment.reviewer, batch.ID, "rollback-publish-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range claim.Items {
+		if _, err := environment.annotations.Annotate(ctx, environment.reviewer, batch.ID, claim.Batch.LeaseToken, item.ID, "grasp", `{"quality":"accepted"}`, "rollback-publish-item", item.Version); err != nil {
+			t.Fatalf("annotate item: %v", err)
+		}
+	}
+	if _, err := environment.annotations.Submit(ctx, environment.reviewer, batch.ID, claim.Batch.LeaseToken, "rollback-publish-submit"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.annotations.Review(ctx, environment.steward, batch.ID, "rollback-publish-review", true, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	draft, err := environment.datasets.Create(ctx, environment.steward, "Rollback Release Set", "rollback-publish-dataset")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft, _, err = environment.datasets.AddCaptures(ctx, environment.steward, draft.ID, "rollback-publish-items", []string{fixture.plan.Capture.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if draft, err = environment.datasets.Freeze(ctx, environment.steward, draft.ID, "rollback-publish-freeze"); err != nil {
+		t.Fatal(err)
+	}
+	if draft, err = environment.datasets.Review(ctx, environment.reviewer, draft.ID, "rollback-publish-quality", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	approvedVersion := draft.Version
+
+	if _, err := environment.database.SQL().Exec(`
+		CREATE TRIGGER fail_publish_outbox BEFORE INSERT ON outbox_events
+		WHEN NEW.topic = 'dataset.publish'
+		BEGIN SELECT RAISE(ABORT, 'forced outbox failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := environment.database.SQL().Exec(`DROP TRIGGER fail_publish_outbox`); err != nil {
+			t.Errorf("drop trigger: %v", err)
+		}
+	}()
+
+	if _, err := environment.datasets.Publish(ctx, environment.steward, draft.ID, "rollback-publish"); err == nil {
+		t.Fatal("publish unexpectedly succeeded while outbox insert failed")
+	}
+
+	current, items, err := environment.datasets.Get(ctx, environment.steward, draft.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != domain.DatasetStatusApproved || current.Version != approvedVersion {
+		t.Fatalf("failed publish leaked dataset state: %+v", current)
+	}
+	if len(items) != 1 {
+		t.Fatalf("dataset membership changed after failed publish: %d items", len(items))
+	}
+
+	var releaseCount, releaseItemCount, publishEvents int
+	if err := environment.database.SQL().QueryRow(`SELECT COUNT(*) FROM dataset_releases WHERE dataset_id = ?`, draft.ID).Scan(&releaseCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.database.SQL().QueryRow(`SELECT COUNT(*) FROM release_items`).Scan(&releaseItemCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.database.SQL().QueryRow(`SELECT COUNT(*) FROM outbox_events WHERE topic = 'dataset.publish'`).Scan(&publishEvents); err != nil {
+		t.Fatal(err)
+	}
+	if releaseCount != 0 || releaseItemCount != 0 || publishEvents != 0 {
+		t.Fatalf("failed publish leaked side effects: releases=%d release_items=%d outbox=%d", releaseCount, releaseItemCount, publishEvents)
+	}
+}
+
 var _ *sql.DB
