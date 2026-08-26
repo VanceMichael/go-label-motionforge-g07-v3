@@ -264,6 +264,13 @@ func (s *Service) Revoke(ctx context.Context, principal auth.Principal, releaseI
 		if err := release.Status.Transition(domain.DatasetStatusRevoked); err != nil {
 			return err
 		}
+		active, err := s.repo.CountActiveJobs(ctx, tx, principal.TenantID, releaseID)
+		if err != nil {
+			return err
+		}
+		if active > 0 {
+			return domain.Precondition("dataset.revoke", "dataset_release", releaseID, "release is referenced by active training jobs")
+		}
 		if err := s.repo.TransitionRelease(ctx, tx, principal.TenantID, releaseID, release.Status, domain.DatasetStatusRevoked, release.Version, now); err != nil {
 			return err
 		}
@@ -290,6 +297,10 @@ func (s *Service) Get(ctx context.Context, principal auth.Principal, datasetID s
 		return domain.DatasetDraft{}, nil, err
 	}
 	return draft, items, nil
+}
+
+func (s *Service) GetRelease(ctx context.Context, principal auth.Principal, releaseID string) (domain.DatasetRelease, error) {
+	return s.repo.FindRelease(ctx, s.db.SQL(), principal.TenantID, releaseID)
 }
 
 func (s *Service) List(ctx context.Context, principal auth.Principal, filter ListFilter) ([]domain.DatasetDraft, int, error) {

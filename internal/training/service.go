@@ -89,6 +89,13 @@ func (s *Service) Claim(ctx context.Context, principal auth.Principal) (ClaimRes
 		if job.AttemptCount >= job.MaxAttempts {
 			return domain.Precondition("training.claim", "training_job", job.ID, "job exhausted its attempt budget")
 		}
+		release, err := s.datasets.FindRelease(ctx, tx, principal.TenantID, job.ReleaseID)
+		if err != nil {
+			return err
+		}
+		if release.Status != domain.DatasetStatusPublished {
+			return domain.Precondition("training.claim", "dataset_release", job.ReleaseID, "release is no longer published")
+		}
 		expires := now.Add(s.leaseTTL)
 		if err := s.repo.Claim(ctx, tx, job, principal.UserID, token, now, expires); err != nil {
 			return err

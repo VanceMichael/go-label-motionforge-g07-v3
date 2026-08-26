@@ -165,6 +165,34 @@ func checksum(value string) string {
 	return domain.Fingerprint(value)
 }
 
+// acceptedCapture returns a validated capture with an accepted annotation
+// batch so the capture satisfies dataset eligibility preconditions.
+func (e *testEnvironment) acceptedCapture(t *testing.T) captureFixture {
+	t.Helper()
+	ctx := context.Background()
+	fixture := e.validatedCapture(t)
+	batch, items, err := e.annotations.Create(ctx, e.steward, fixture.plan.Capture.ID, "fixture-batch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := e.annotations.Claim(ctx, e.reviewer, batch.ID, "fixture-batch-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if _, err := e.annotations.Annotate(ctx, e.reviewer, batch.ID, claim.Batch.LeaseToken, item.ID, "grasp", `{"quality":"accepted"}`, "fixture-item", item.Version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.annotations.Submit(ctx, e.reviewer, batch.ID, claim.Batch.LeaseToken, "fixture-batch-submit"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.annotations.Review(ctx, e.steward, batch.ID, "fixture-batch-review", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
 func assertErrorKind(t *testing.T, err, kind error) {
 	t.Helper()
 	if !errors.Is(err, kind) {

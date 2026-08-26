@@ -316,8 +316,7 @@ func (Repository) FindRelease(ctx context.Context, q storage.Queryer, tenantID, 
 
 func (Repository) CountActiveJobs(ctx context.Context, q storage.Queryer, tenantID, releaseID string) (int, error) {
 	var count int
-	readCtx := context.Background()
-	err := q.QueryRowContext(readCtx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM training_jobs
 		WHERE tenant_id = ? AND release_id = ? AND status IN ('queued','running','retrying')`, tenantID, releaseID).Scan(&count)
 	if err != nil {

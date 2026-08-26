@@ -384,4 +384,110 @@ func TestRestartRetainsWorkflowState(t *testing.T) {
 	}
 }
 
+func TestRevokeBlockedWhileTrainingJobActive(t *testing.T) {
+	environment := newEnvironment(t)
+	fixture := environment.acceptedCapture(t)
+	ctx := context.Background()
+
+	draft, err := environment.datasets.Create(ctx, environment.steward, "Revoke guard set", "guard-dataset")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := environment.datasets.AddCaptures(ctx, environment.steward, draft.ID, "guard-items", []string{fixture.plan.Capture.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.datasets.Freeze(ctx, environment.steward, draft.ID, "guard-freeze"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.datasets.Review(ctx, environment.reviewer, draft.ID, "guard-quality", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	release, err := environment.datasets.Publish(ctx, environment.steward, draft.ID, "guard-publish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.training.Enqueue(ctx, environment.steward, release.ID, "guard-enqueue"); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := environment.training.Claim(ctx, environment.worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.Job.Status != domain.JobRunning {
+		t.Fatalf("claim status = %s, want running", claimed.Job.Status)
+	}
+	if _, err := environment.datasets.Revoke(ctx, environment.steward, release.ID, "guard-revoke", "retired"); !errors.Is(err, domain.ErrPrecondition) {
+		t.Fatalf("revoke active release error = %v, want precondition", err)
+	}
+	persisted, err := environment.datasets.GetRelease(ctx, environment.steward, release.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != domain.DatasetStatusPublished || persisted.RevokedAt != nil {
+		t.Fatalf("revoked-attempted release changed: %+v", persisted)
+	}
+	checkpointed, err := environment.training.Checkpoint(ctx, environment.worker, claimed.Job.ID, claimed.Job.LeaseToken, "guard-checkpoint", claimed.Job.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.training.Complete(ctx, environment.worker, claimed.Job.ID, checkpointed.LeaseToken, "s3://models/guard", "guard-complete", checkpointed.Version); err != nil {
+		t.Fatal(err)
+	}
+	revoked, err := environment.datasets.Revoke(ctx, environment.steward, release.ID, "guard-revoke-after", "retired")
+	if err != nil {
+		t.Fatalf("revoke after completion error = %v", err)
+	}
+	if revoked.Status != domain.DatasetStatusRevoked || revoked.RevokedAt == nil {
+		t.Fatalf("unexpected revoked release: %+v", revoked)
+	}
+}
+
+func TestClaimRefusesRevokedRelease(t *testing.T) {
+	environment := newEnvironment(t)
+	fixture := environment.acceptedCapture(t)
+	ctx := context.Background()
+
+	draft, err := environment.datasets.Create(ctx, environment.steward, "Claim guard set", "claim-guard-dataset")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := environment.datasets.AddCaptures(ctx, environment.steward, draft.ID, "claim-guard-items", []string{fixture.plan.Capture.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.datasets.Freeze(ctx, environment.steward, draft.ID, "claim-guard-freeze"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.datasets.Review(ctx, environment.reviewer, draft.ID, "claim-guard-quality", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	release, err := environment.datasets.Publish(ctx, environment.steward, draft.ID, "claim-guard-publish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.datasets.Revoke(ctx, environment.steward, release.ID, "claim-guard-revoke", "retired"); err != nil {
+		t.Fatalf("revoke before claim error = %v", err)
+	}
+	// Simulate a stale queued job that references the now-revoked release.
+	now := storage.FormatTime(environment.clock.Now())
+	if _, err := environment.database.SQL().Exec(`
+		INSERT INTO training_jobs(
+			id, tenant_id, release_id, status, owner, lease_token,
+			lease_expires_at, attempt_count, max_attempts, checkpoint,
+			output_uri, last_error, next_attempt_at, created_at, updated_at, version
+		) VALUES('job_stale_revoked', ?, ?, 'queued', '', '', NULL, 0, 3, '', '', '', ?, ?, ?, 1)`,
+		environment.admin.TenantID, release.ID, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.training.Claim(ctx, environment.worker); !errors.Is(err, domain.ErrPrecondition) {
+		t.Fatalf("claim revoked release error = %v, want precondition", err)
+	}
+	persisted, err := environment.training.Get(ctx, environment.worker, "job_stale_revoked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != domain.JobQueued || persisted.Owner != "" {
+		t.Fatalf("claim against revoked release mutated job: %+v", persisted)
+	}
+}
+
 var _ *sql.DB
