@@ -232,13 +232,6 @@ func (s *Service) AlignCapture(ctx context.Context, principal auth.Principal, ca
 	if err := validateAlignment(manifests, tolerance); err != nil {
 		return nil, err
 	}
-	for _, manifest := range manifests {
-		if err := s.db.Write(ctx, func(transitionTx *sql.Tx) error {
-			return s.repo.TransitionManifest(ctx, transitionTx, principal.TenantID, manifest.ID, domain.ManifestSealed, domain.ManifestAligned, manifest.Version, "", storage.FormatTime(now))
-		}); err != nil {
-			return nil, err
-		}
-	}
 	var aligned []domain.StreamManifest
 	err = s.db.Write(ctx, func(tx *sql.Tx) error {
 		captureValue, err := s.captures.Find(ctx, tx, principal.TenantID, captureID)
@@ -254,6 +247,9 @@ func (s *Service) AlignCapture(ctx context.Context, principal auth.Principal, ca
 		for i := range manifests {
 			manifest := &manifests[i]
 			if err := manifest.Status.Transition(domain.ManifestAligned); err != nil {
+				return err
+			}
+			if err := s.repo.TransitionManifest(ctx, tx, principal.TenantID, manifest.ID, domain.ManifestSealed, domain.ManifestAligned, manifest.Version, "", storage.FormatTime(now)); err != nil {
 				return err
 			}
 			manifest.Status, manifest.UpdatedAt, manifest.Version = domain.ManifestAligned, now, manifest.Version+1
