@@ -72,20 +72,9 @@ func (s *Service) AddCaptures(ctx context.Context, principal auth.Principal, dat
 		seen[captureID] = struct{}{}
 	}
 	now := s.clock.Now()
-	preDraft, err := s.repo.FindDraft(ctx, s.db.SQL(), principal.TenantID, datasetID)
-	if err != nil {
-		return domain.DatasetDraft{}, nil, err
-	}
-	preID, err := domain.NewID("dataset_item")
-	if err != nil {
-		return domain.DatasetDraft{}, nil, err
-	}
-	if err := s.repo.InsertItems(ctx, s.db.SQL(), []domain.DatasetItem{{ID: preID, TenantID: principal.TenantID, DatasetID: datasetID, CaptureID: captureIDs[0], Revision: preDraft.Revision, CreatedAt: now}}); err != nil {
-		return domain.DatasetDraft{}, nil, err
-	}
 	var updated domain.DatasetDraft
 	var items []domain.DatasetItem
-	err = s.db.Write(ctx, func(tx *sql.Tx) error {
+	err := s.db.Write(ctx, func(tx *sql.Tx) error {
 		draft, err := s.repo.FindDraft(ctx, tx, principal.TenantID, datasetID)
 		if err != nil {
 			return err
